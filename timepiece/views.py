@@ -76,7 +76,6 @@ class CSVMixin(object):
 
 @login_required
 def dashboard(request, active_tab):
-    active_tab = active_tab or 'progress'
     user = request.user
     Entry = timepiece.Entry
     ProjectHours = timepiece.ProjectHours
@@ -117,7 +116,7 @@ def dashboard(request, active_tab):
             .exclude(user=user).select_related('user', 'project', 'activity')
 
     return render(request, 'timepiece/time-sheet/dashboard.html', {
-        'active_tab': active_tab,
+        'active_tab': active_tab or 'progress',
         'today': today,
         'week_start': week_start.date(),
         'week_end': week_end.date(),
@@ -1429,28 +1428,25 @@ class ProjectHoursMixin(object):
             if not request.user.has_perm(perm):
                 return HttpResponseRedirect(reverse('auth_login'))
 
-        # Since we use get param in multiple places, attach it to the class
-        default_week = utils.get_week_start(datetime.date.today()).date()
-
+        # Since week_start is used in multiple places, attach it to the class.
         if request.method == 'GET':
-            week_start_str = request.GET.get('week_start', '')
+            param = request.GET.get('week_start', None)
         else:
-            week_start_str = request.POST.get('week_start', '')
-
-        # Account for an empty string
-        self.week_start = default_week if week_start_str == '' \
-            else utils.get_week_start(datetime.datetime.strptime(
-                week_start_str, '%Y-%m-%d').date())
+            param = request.POST.get('week_start', None)
+        week_date = datetime.datetime.strptime(param, '%Y-%m-%d')\
+                if param else datetime.date.today()
+        self.week_start = utils.get_week_start(week_date).date()
 
         return super(ProjectHoursMixin, self).dispatch(request, *args,
-            **kwargs)
+                **kwargs)
 
     def get_hours_for_week(self, start=None):
+        """Filter ProjectHours assignments for the given week."""
         week_start = start if start else self.week_start
         week_end = week_start + relativedelta(days=7)
 
-        return timepiece.ProjectHours.objects.filter(
-            week_start__gte=week_start, week_start__lt=week_end)
+        weekQ = Q(week_start__gte=week_start, week_start__lt=week_end)
+        return timepiece.ProjectHours.objects.filter(weekQ)
 
 
 class ProjectHoursView(ProjectHoursMixin, TemplateView):
@@ -1463,12 +1459,15 @@ class ProjectHoursView(ProjectHoursMixin, TemplateView):
         initial = {'week_start': self.week_start}
         form = timepiece_forms.ProjectHoursSearchForm(initial=initial)
 
-        project_hours = utils.get_project_hours_for_week(self.week_start) \
-            .filter(published=True)
-        people = utils.get_people_from_project_hours(project_hours)
+        project_hours = self.get_hours_for_week().filter(published=True)\
+                .values('project__id', 'project__name', 'user__id',
+                    'user__first_name', 'user__last_name', 'hours')\
+                .order_by('-project__type__billable', 'project__name')
+        people = project_hours.values_list('user__id', 'user__first_name',
+                    'user__last_name')\
+                .order_by('user__first_name', 'user__last_name')
         id_list = [person[0] for person in people]
         projects = []
-
         func = lambda o: o['project__id']
         for project, entries in groupby(project_hours, func):
             entries = list(entries)
@@ -1500,9 +1499,8 @@ class EditProjectHoursView(ProjectHoursMixin, TemplateView):
     def get_context_data(self, **kwargs):
         context = super(EditProjectHoursView, self).get_context_data(**kwargs)
 
-        form = timepiece_forms.ProjectHoursSearchForm(initial={
-            'week_start': self.week_start
-        })
+        initial = {'week_start': self.week_start}
+        form = timepiece_forms.ProjectHoursSearchForm(initial=initial)
 
         context.update({
             'form': form,
@@ -1512,21 +1510,20 @@ class EditProjectHoursView(ProjectHoursMixin, TemplateView):
         return context
 
     def post(self, request, *args, **kwargs):
-        ph = self.get_hours_for_week(self.week_start).filter(published=False)
+        ph = self.get_hours_for_week().filter(published=False)
 
         if ph.exists():
             ph.update(published=True)
-            msg = 'Unpublished project hours are now published'
+            msg = 'Unpublished project hours for the week of {0} are now '\
+                  'published.'.format(self.week_start.strftime('%B %d'))
         else:
-            msg = 'There were no hours to publish'
+            msg = 'All project hours for the week of {0} have already been '\
+                  'published.'.format(self.week_start.strftime('%B %d'))
 
         messages.info(request, msg)
 
-        param = {
-            'week_start': self.week_start.strftime('%Y-%m-%d')
-        }
-        url = '?'.join((reverse('edit_project_hours'),
-            urllib.urlencode(param),))
+        param = {'week_start': self.week_start.strftime('%Y-%m-%d')}
+        url = '?'.join((reverse('edit_project_hours'), urllib.urlencode(param)))
 
         return HttpResponseRedirect(url)
 
@@ -1604,7 +1601,7 @@ class ProjectHoursAjaxView(ProjectHoursMixin, View):
             except AttributeError:
                 for entry in duplicate_builder(queryset, new_date):
                     entry.save()
-            msg = 'Project hours were copied'
+            msg = 'Project hours were copied.'
             messages.info(self.request, msg)
 
         this_week = datetime.datetime.strptime(week_update, '%Y-%m-%d').date()
@@ -1619,7 +1616,7 @@ class ProjectHoursAjaxView(ProjectHoursMixin, View):
             urllib.urlencode(param),))
 
         if not prev_week_qs.exists():
-            msg = 'There are no hours to copy'
+            msg = 'There are no hours to copy.'
             messages.warning(self.request, msg)
         else:
             this_week_qs.delete()
@@ -1641,7 +1638,7 @@ class ProjectHoursAjaxView(ProjectHoursMixin, View):
             ph = form.save()
             return HttpResponse(str(ph.pk), mimetype='text/plain')
 
-        msg = 'The request must contain values for user, project, and hours'
+        msg = 'The request must contain values for user, project, and hours.'
         return HttpResponse(msg, status=500)
 
     def post(self, request, *args, **kwargs):
