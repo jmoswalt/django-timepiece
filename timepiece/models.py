@@ -966,7 +966,7 @@ class ContractAssignment(models.Model):
 
 
 class UserProfile(models.Model):
-    user = models.OneToOneField(User, unique=True, related_name='profile')
+    user = models.OneToOneField(User, unique=True, related_name='timepiece_profile')
     hours_per_week = models.DecimalField(max_digits=8, decimal_places=2,
                                          default=40)
 
